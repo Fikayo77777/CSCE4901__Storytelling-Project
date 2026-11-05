@@ -135,5 +135,46 @@ describe('Supabase-backed class and lobby routes', () => {
       student_id: STUDENT_ID,
       status: 'active',
     });
+
+    const refreshed = await request(createApp(supabase))
+      .get(`/lobbies/${lobbyId}/students`);
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.students).toEqual([
+      { studentId: STUDENT_ID, displayName: 'Student' },
+    ]);
+  });
+
+  test('rejects a validly formatted but unknown lobby code', async () => {
+    const supabase = seededSupabase();
+    const response = await request(createApp(supabase))
+      .post('/lobbies/join')
+      .set('x-user-id', STUDENT_ID)
+      .send({ code: 'ZZZZZZ' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe('Could not join');
+    expect(supabase.tables.lobby_participants || []).toHaveLength(0);
+  });
+
+  test('rejects a student who is not enrolled in the lobby class', async () => {
+    const supabase = seededSupabase();
+    const lobbyId = '00000000-0000-4000-8000-000000000004';
+    const outsiderId = '00000000-0000-4000-8000-000000000005';
+    supabase.tables.lobbies = [{
+      lobby_id: lobbyId,
+      class_id: CLASS_ID,
+      join_code: 'ABC234',
+      lobby_name: 'Room 1 Lobby',
+      status: 'waiting',
+    }];
+
+    const response = await request(createApp(supabase))
+      .post('/lobbies/join')
+      .set('x-user-id', outsiderId)
+      .send({ code: 'ABC234' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe('Could not join');
+    expect(supabase.tables.lobby_participants || []).toHaveLength(0);
   });
 });
