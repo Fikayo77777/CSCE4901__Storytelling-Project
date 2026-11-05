@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
-import { onAuthStateChanged, signOut, type User } from "firebase/auth";
+import type { User } from "@supabase/supabase-js";
 import { AuthScreen } from "./auth-screen";
-import { auth, authConfigurationMissing } from "./firebase-client";
+import { supabase, supabaseConfigurationMissing } from "./supabase-client";
 import { StudentLobby } from "./student-lobby";
 
 type Student = { studentId: string; displayName: string };
@@ -15,59 +15,33 @@ type Lobby = {
 };
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const { data, error } = await supabase.auth.getSession();
+  if (error) throw error;
+  const accessToken = data.session?.access_token;
+  if (!accessToken) throw new Error("Sign in is required.");
+
   const headers = new Headers(options.headers);
-  const currentUser = auth?.currentUser;
-  const isDevBypass =
-    process.env.NODE_ENV !== "production" &&
-    (process.env.NEXT_PUBLIC_ALLOW_DEV_MODE === "true" ||
-      process.env.NEXT_PUBLIC_USE_AUTH_EMULATOR === "true");
-
-  if (!currentUser) {
-    if (isDevBypass) {
-      headers.set("x-teacher-id", "local-dev-teacher");
-    } else {
-      throw new Error("Sign in is required.");
-    }
-  } else {
-    headers.set("Authorization", `Bearer ${await currentUser.getIdToken()}`);
-    if (isDevBypass) {
-      headers.set("x-teacher-id", currentUser.uid);
-    }
-  }
-
+  headers.set("Authorization", "Bearer " + accessToken);
   if (options.body && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`/api${path}`, { ...options, headers });
+  const response = await fetch("/api" + path, { ...options, headers });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || `Request failed (${response.status})`);
+    throw new Error(payload.error || "Request failed (" + response.status + ")");
   }
   return payload as T;
 }
 
 export default function Home() {
-  const devMode =
-    process.env.NODE_ENV !== "production" &&
-    (process.env.NEXT_PUBLIC_ALLOW_DEV_MODE === "true" ||
-      process.env.NEXT_PUBLIC_USE_AUTH_EMULATOR === "true");
-  const [user, setUser] = useState<User | null>(() =>
-    devMode ? ({ uid: "local-dev-teacher" } as User) : null,
+  const [user, setUser] = useState<User | null>(null);
+  const [userRole, setUserRole] = useState<"teacher" | null>(null);
+  const [authReady, setAuthReady] = useState(supabaseConfigurationMissing);
+  const [authError, setAuthError] = useState(
+    supabaseConfigurationMissing ? "Supabase auth is not configured for this app." : "",
   );
-  const [userRole, setUserRole] = useState<"teacher" | null>(() =>
-    devMode ? "teacher" : null,
-  );
-  const [authReady, setAuthReady] = useState(
-    devMode || !auth || authConfigurationMissing,
-  );
-  const [authError, setAuthError] = useState(() => {
-    if (devMode) return "Local dev mode enabled. Opening the host lobby.";
-    if (!auth || authConfigurationMissing) {
-      return "Firebase auth is not configured for this app.";
-    }
-    return "";
-  });
   const [activeTab, setActiveTab] = useState("Class Lobby");
   const [copied, setCopied] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -87,11 +61,10 @@ export default function Home() {
   const started = lobby?.status === "locked";
 
   useEffect(() => {
-    if (devMode || !auth || authConfigurationMissing) {
-      return;
-    }
+    if (!supabase) return;
     let current = true;
-    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+    const { data: authState } = supabase.auth.onAuthStateChange((event, session) => {
+      const nextUser = session?.user ?? null;
       setUser(nextUser);
       if (!nextUser) {
         setUserRole(null);
@@ -100,26 +73,38 @@ export default function Home() {
         setLobby(null);
       }
       setAuthError("");
-      if (nextUser) {
-        try {
-          const token = await nextUser.getIdTokenResult();
-          if (current && token.claims.role === "teacher") {
-            setUserRole("teacher");
-          }
-        } catch {
-          if (current) {
-            setAuthError("Could not verify your account role. Sign in again.");
-          }
-        }
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT") {
+        setClasses([]);
+        setClassId("");
+        setStudents([]);
+        setJoinedIds([]);
+        setLobby(null);
       }
-      if (current) setAuthReady(true);
+      if (!session) {
+        setAuthReady(true);
+        return;
+      }
+      setAuthReady(false);
+      void fetch("/api/profile", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      }).then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Could not verify your account role.");
+        if (current && payload.role === "teacher") setUserRole("teacher");
+        if (current) setAuthReady(true);
+      }).catch((reason: unknown) => {
+        if (current) {
+          setAuthError(reason instanceof Error ? reason.message : "Could not verify your account role.");
+          setAuthReady(true);
+        }
+      });
     });
 
     return () => {
       current = false;
-      unsubscribe();
+      authState.subscription.unsubscribe();
     };
-  }, [devMode]);
+  }, []);
 
   useEffect(() => {
     if (!user || !isTeacher) return;
@@ -385,14 +370,10 @@ export default function Home() {
   }
 
   function handleSignOut() {
-    if (auth?.currentUser) {
-      void signOut(auth);
-    }
-    setUser(null);
-    setUserRole(null);
-    setStudents([]);
-    setJoinedIds([]);
-    setLobby(null);
+    if (!supabase) return;
+    void supabase.auth.signOut().then(({ error }) => {
+      if (error) setAuthError(error.message);
+    });
   }
 
   const navItems = [
@@ -411,9 +392,9 @@ export default function Home() {
   if (!user) {
     return (
       <AuthScreen
-        onAuthenticated={(authedUser, role) => {
+        onAuthenticated={(authedUser) => {
           setUser(authedUser);
-          setUserRole(role === "teacher" ? "teacher" : null);
+          setAuthReady(false);
         }}
       />
     );

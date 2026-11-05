@@ -1,79 +1,94 @@
-function createFirebaseAuthMiddleware({ admin, requiredRole, allowedRoles }) {
-  const devBypassEnabled = process.env.NODE_ENV !== 'production' && (
-    process.env.ALLOW_DEV_MODE === 'true' ||
-    process.env.USE_AUTH_EMULATOR === 'true'
-  );
+const VALID_ROLES = new Set(['student', 'teacher']);
 
+function getDisplayName(user) {
+  const metadataName = user.user_metadata?.display_name;
+  if (typeof metadataName === 'string' && metadataName.trim()) {
+    return metadataName.trim().slice(0, 50);
+  }
+  const emailName = typeof user.email === 'string' ? user.email.split('@')[0] : '';
+  return emailName.trim().slice(0, 50) || 'Student';
+}
+
+async function getOrCreateProfile(supabase, user) {
+  const existing = await supabase
+    .from('profiles')
+    .select('role, display_name')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (existing.error) throw existing.error;
+  if (existing.data) return existing.data;
+
+  const created = await supabase
+    .from('profiles')
+    .upsert(
+      { id: user.id, display_name: getDisplayName(user), role: 'student' },
+      { onConflict: 'id', ignoreDuplicates: true },
+    );
+  if (created.error) throw created.error;
+
+  const profile = await supabase
+    .from('profiles')
+    .select('role, display_name')
+    .eq('id', user.id)
+    .single();
+  if (profile.error) throw profile.error;
+  return profile.data;
+}
+
+function createSupabaseAuthMiddleware({ supabase, requiredRole, allowedRoles }) {
   return async function authenticate(req, res, next) {
     const authorization = req.get('authorization');
     const match = typeof authorization === 'string'
       ? authorization.match(/^Bearer\s+([^\s]+)$/i)
       : null;
 
-    if (devBypassEnabled) {
-      const devTeacherId = req.get('x-teacher-id');
-      const devStudentId = req.get('x-test-student-uid');
-      const devUid = devTeacherId || devStudentId;
-      if (typeof devUid === 'string' && devUid.length > 0) {
-        const role = requiredRole || (allowedRoles && allowedRoles.includes('student') ? 'student' : 'teacher');
-        req.user = { uid: devUid, role };
-        return next();
-      }
-    }
-
-    if (!match) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    let claims;
-    try {
-      claims = await admin.auth().verifyIdToken(match[1]);
-    } catch {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    if (typeof claims.uid !== 'string' || claims.uid.length === 0) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    if (requiredRole && claims.role !== requiredRole) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    if (allowedRoles && !allowedRoles.includes(claims.role)) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-
-    req.user = { uid: claims.uid, role: claims.role || null };
-    return next();
-  };
-}
-
-function createRequireTeacher(admin) {
-  return createFirebaseAuthMiddleware({ admin, requiredRole: 'teacher' });
-}
-
-function createRequireStudent(admin) {
-  return createFirebaseAuthMiddleware({ admin, allowedRoles: [undefined, 'student'] });
-}
-
-function createFirebaseSocketAuth(admin) {
-  return async function verifySocketToken(socket, next) {
-    const token = socket.handshake.auth?.token;
-    if (typeof token !== 'string' || token.length === 0) {
-      return next(new Error('unauthorized'));
-    }
+    if (!match) return res.status(401).json({ error: 'Unauthorized' });
 
     try {
-      const claims = await admin.auth().verifyIdToken(token);
-      if (typeof claims.uid !== 'string' || claims.uid.length === 0) {
-        return next(new Error('unauthorized'));
+      const { data, error } = await supabase.auth.getUser(match[1]);
+      if (error || !data.user?.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
       }
-      socket.data.uid = claims.uid;
-      socket.data.role = claims.role || null;
+
+      const profile = await getOrCreateProfile(supabase, data.user);
+      if (!VALID_ROLES.has(profile.role)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (requiredRole && profile.role !== requiredRole) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (allowedRoles && !allowedRoles.includes(profile.role)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      req.user = {
+        uid: data.user.id,
+        role: profile.role,
+        displayName: profile.display_name,
+      };
       return next();
-    } catch {
-      return next(new Error('unauthorized'));
+    } catch (error) {
+      return next(error);
     }
   };
 }
 
-module.exports = { createFirebaseSocketAuth, createRequireStudent, createRequireTeacher };
+function createRequireUser(supabase) {
+  return createSupabaseAuthMiddleware({ supabase });
+}
+
+function createRequireTeacher(supabase) {
+  return createSupabaseAuthMiddleware({ supabase, requiredRole: 'teacher' });
+}
+
+function createRequireStudent(supabase) {
+  return createSupabaseAuthMiddleware({ supabase, requiredRole: 'student' });
+}
+
+module.exports = {
+  createRequireStudent,
+  createRequireTeacher,
+  createRequireUser,
+  createSupabaseAuthMiddleware,
+};

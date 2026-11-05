@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { signOut, type User } from "firebase/auth";
+import type { User } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
-import { auth } from "./firebase-client";
+import { supabase } from "./supabase-client";
 
 type JoinResponse = { token: string; lobbyId: string; displayName: string };
 
@@ -28,11 +28,16 @@ export function StudentLobby({ user }: { user: User }) {
     setConnection("Connecting...");
 
     try {
-      const idToken = await user.getIdToken();
+      if (!supabase) throw new Error("Supabase is not configured.");
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) throw new Error("Sign in is required.");
+
       const response = await fetch("/api/lobbies/join", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${idToken}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ code: code.trim().toUpperCase() }),
@@ -73,14 +78,14 @@ export function StudentLobby({ user }: { user: User }) {
             </p>
             <h1 className="mt-2 text-2xl font-bold">Student lobby</h1>
           </div>
-          <button onClick={() => auth && void signOut(auth)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold">
+          <button onClick={() => void supabase?.auth.signOut()} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold">
             Sign out
           </button>
         </header>
 
         <section className="mt-8 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <p className="text-sm text-slate-600">Signed in as {user.email || "student"}</p>
-          <p className="mt-2 break-all font-mono text-xs text-slate-500">Student ID: {user.uid}</p>
+          <p className="mt-2 break-all font-mono text-xs text-slate-500">Student ID: {user.id}</p>
           <p className="mt-1 text-xs text-slate-500">Enter the valid class code to join the live lobby.</p>
 
           {!joined ? (

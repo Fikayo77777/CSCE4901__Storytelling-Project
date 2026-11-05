@@ -3,43 +3,40 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 
-const STUDENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-const CLASS_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-const GAME_MODES = new Set(['divide']);
-const JOIN_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-const JOIN_FAILURE = { error: 'Could not join' };
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_PATTERN = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
+const ACTIVE_STATUSES = ['waiting', 'active', 'open', 'locked'];
 
-class CodeCollisionError extends Error {}
-
-function cleanDisplayName(value) {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const displayName = value.trim();
-  return displayName.length >= 1 && displayName.length <= 50 ? displayName : null;
+function throwOnError(result) {
+  if (result.error) throw result.error;
+  return result.data;
 }
 
-function validStudentId(value) {
-  return typeof value === 'string' && STUDENT_ID_PATTERN.test(value);
-}
-
-function generateJoinCode() {
-  let joinCode = '';
-  while (joinCode.length < 6) {
+function createJoinCode() {
+  let code = '';
+  while (code.length < 6) {
     for (const byte of crypto.randomBytes(8)) {
-      if (byte < 248) {
-        joinCode += JOIN_CODE_ALPHABET[byte % JOIN_CODE_ALPHABET.length];
-      }
-      if (joinCode.length === 6) {
-        break;
-      }
+      if (byte < 224) code += CODE_ALPHABET[byte % CODE_ALPHABET.length];
+      if (code.length === 6) break;
     }
   }
-  return joinCode;
+  return code;
 }
 
-function createLobbyRouter({ db, admin, requireTeacher, requireStudent, jwtSecret, getIo }) {
+function databaseStatus(status) {
+  if (status === 'open') return 'waiting';
+  if (status === 'locked') return 'active';
+  return status;
+}
+
+function clientStatus(status) {
+  if (status === 'waiting') return 'open';
+  if (status === 'active') return 'locked';
+  return status;
+}
+
+function createLobbyRouter({ supabase, requireTeacher, requireStudent, jwtSecret, getIo }) {
   if (typeof jwtSecret !== 'string' || jwtSecret.length < 32) {
     throw new Error('jwtSecret must be at least 32 characters');
   }
@@ -53,15 +50,28 @@ function createLobbyRouter({ db, admin, requireTeacher, requireStudent, jwtSecre
   });
 
   async function requireLobbyOwner(req, res, next) {
+    if (!UUID_PATTERN.test(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid lobbyId' });
+    }
+
     try {
-      const lobbyRef = db.collection('lobbies').doc(req.params.id);
-      const lobbySnapshot = await lobbyRef.get();
-      if (!lobbySnapshot.exists || lobbySnapshot.data().teacherId !== req.user.uid) {
+      const lobby = throwOnError(await supabase
+        .from('lobbies')
+        .select('lobby_id, class_id, join_code, status')
+        .eq('lobby_id', req.params.id)
+        .maybeSingle());
+      if (!lobby) return res.status(403).json({ error: 'Forbidden' });
+
+      const schoolClass = throwOnError(await supabase
+        .from('classes')
+        .select('teacher_id')
+        .eq('class_id', lobby.class_id)
+        .maybeSingle());
+      if (!schoolClass || schoolClass.teacher_id !== req.user.uid) {
         return res.status(403).json({ error: 'Forbidden' });
       }
 
-      req.lobbyRef = lobbyRef;
-      req.lobbyData = lobbySnapshot.data();
+      req.lobbyData = lobby;
       return next();
     } catch (error) {
       return next(error);
@@ -70,177 +80,156 @@ function createLobbyRouter({ db, admin, requireTeacher, requireStudent, jwtSecre
 
   router.get('/lobbies', requireTeacher, async (req, res) => {
     const { classId } = req.query;
-    if (typeof classId !== 'string' || !CLASS_ID_PATTERN.test(classId)) {
+    if (typeof classId !== 'string' || !UUID_PATTERN.test(classId)) {
       return res.status(400).json({ error: 'classId is required' });
     }
 
-    const classSnapshot = await db.collection('classes').doc(classId).get();
-    if (!classSnapshot.exists || classSnapshot.data().teacherId !== req.user.uid) {
+    const schoolClass = throwOnError(await supabase
+      .from('classes')
+      .select('teacher_id')
+      .eq('class_id', classId)
+      .maybeSingle());
+    if (!schoolClass || schoolClass.teacher_id !== req.user.uid) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const snapshot = await db.collection('lobbies')
-      .where('teacherId', '==', req.user.uid)
-      .get();
+    const lobbies = throwOnError(await supabase
+      .from('lobbies')
+      .select('lobby_id, join_code, status, created_at')
+      .eq('class_id', classId)
+      .neq('status', 'closed')
+      .order('created_at', { ascending: false }));
     return res.json({
-      lobbies: snapshot.docs
-        .map((doc) => ({ lobbyId: doc.id, ...doc.data() }))
-        .filter((lobby) => lobby.classId === classId && lobby.status !== 'closed')
-        .sort((first, second) => {
-          const firstCreated = first.createdAt?.toMillis?.() || 0;
-          const secondCreated = second.createdAt?.toMillis?.() || 0;
-          return secondCreated - firstCreated;
-        }),
+      lobbies: lobbies.map((lobby) => ({
+        lobbyId: lobby.lobby_id,
+        joinCode: lobby.join_code,
+        status: clientStatus(lobby.status),
+        createdAt: lobby.created_at,
+      })),
     });
   });
 
   router.post('/lobbies', requireTeacher, async (req, res) => {
     const { classId } = req.body || {};
-    const minWords = req.body?.minWords ?? 0;
-    const maxWords = req.body?.maxWords ?? 100;
-    const gameMode = req.body?.gameMode ?? 'divide';
-
-    if (typeof classId !== 'string' || !CLASS_ID_PATTERN.test(classId)) {
+    if (typeof classId !== 'string' || !UUID_PATTERN.test(classId)) {
       return res.status(400).json({ error: 'classId is required' });
     }
-    if (
-      !Number.isInteger(minWords) ||
-      !Number.isInteger(maxWords) ||
-      minWords < 0 ||
-      minWords > maxWords ||
-      maxWords > 1000
-    ) {
-      return res.status(400).json({ error: 'Invalid word limits' });
-    }
-    if (typeof gameMode !== 'string' || !GAME_MODES.has(gameMode)) {
-      return res.status(400).json({ error: 'Invalid game mode' });
-    }
 
-    const classRef = db.collection('classes').doc(classId);
-    const classSnapshot = await classRef.get();
-    if (!classSnapshot.exists || classSnapshot.data().teacherId !== req.user.uid) {
+    const schoolClass = throwOnError(await supabase
+      .from('classes')
+      .select('class_id, teacher_id, class_name')
+      .eq('class_id', classId)
+      .maybeSingle());
+    if (!schoolClass || schoolClass.teacher_id !== req.user.uid) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const joinCode = generateJoinCode();
-      const lobbyRef = db.collection('lobbies').doc();
-      const codeRef = db.collection('lobbyCodes').doc(joinCode);
-
-      try {
-          const result = await db.runTransaction(async (transaction) => {
-            const currentClass = await transaction.get(classRef);
-            if (!currentClass.exists || currentClass.data().teacherId !== req.user.uid) {
-              return { forbidden: true };
-            }
-
-            const activeLobbyId = currentClass.data().activeLobbyId;
-            if (typeof activeLobbyId === 'string') {
-              const activeLobbyRef = db.collection('lobbies').doc(activeLobbyId);
-              const activeLobby = await transaction.get(activeLobbyRef);
-              if (activeLobby.exists && activeLobby.data().status !== 'closed') {
-                return { activeLobbyId };
-              }
-            }
-
-          const existingCode = await transaction.get(codeRef);
-          if (existingCode.exists) {
-            throw new CodeCollisionError('Join code already exists');
-          }
-
-          transaction.set(lobbyRef, {
-            teacherId: req.user.uid,
-            classId,
-            joinCode,
-            status: 'open',
-            gameMode,
-            minWords,
-            maxWords,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-          transaction.set(codeRef, { lobbyId: lobbyRef.id });
-            transaction.update(classRef, { activeLobbyId: lobbyRef.id });
-            return { lobbyId: lobbyRef.id };
-        });
-
-          if (result.forbidden) return res.status(403).json({ error: 'Forbidden' });
-          if (result.activeLobbyId) {
-            return res.status(409).json({ error: 'Class already has an active lobby', ...result });
-          }
-
-        return res.status(201).json({ lobbyId: lobbyRef.id, joinCode });
-      } catch (error) {
-        if (!(error instanceof CodeCollisionError)) {
-          throw error;
-        }
-      }
+    const currentLobbies = throwOnError(await supabase
+      .from('lobbies')
+      .select('lobby_id')
+      .eq('class_id', classId)
+      .in('status', ACTIVE_STATUSES)
+      .limit(1));
+    if (currentLobbies.length) {
+      return res.status(409).json({
+        error: 'Class already has an active lobby',
+        lobbyId: currentLobbies[0].lobby_id,
+      });
     }
 
-    return res.status(500).json({ error: 'Unable to create lobby' });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const joinCode = createJoinCode();
+      const existingCode = throwOnError(await supabase
+        .from('lobbies')
+        .select('lobby_id')
+        .eq('join_code', joinCode)
+        .maybeSingle());
+      if (existingCode) continue;
+
+      const result = await supabase
+        .from('lobbies')
+        .insert({
+          class_id: classId,
+          join_code: joinCode,
+          lobby_name: `${schoolClass.class_name} Lobby`,
+          status: 'waiting',
+        })
+        .select('lobby_id')
+        .single();
+
+      if (!result.error) {
+        return res.status(201).json({ lobbyId: result.data.lobby_id, joinCode });
+      }
+      if (result.error.code !== '23505') throw result.error;
+    }
+
+    return res.status(409).json({ error: 'Unable to allocate a unique lobby code' });
   });
 
   router.post('/lobbies/join', joinLimiter, requireStudent, async (req, res) => {
-    const { code } = req.body || {};
-    const studentId = req.user.uid;
+    const rawCode = req.body?.code;
     if (
-      typeof code !== 'string' ||
-      !/^[A-HJ-NP-Z2-9]{6}$/i.test(code.trim()) ||
-      !validStudentId(studentId)
+      typeof rawCode !== 'string' ||
+      !CODE_PATTERN.test(rawCode.trim().toUpperCase()) ||
+      !UUID_PATTERN.test(req.user.uid)
     ) {
-      return res.status(401).json(JOIN_FAILURE);
+      return res.status(401).json({ error: 'Could not join' });
     }
+    const code = rawCode.trim().toUpperCase();
 
     try {
-      const codeSnapshot = await db.collection('lobbyCodes').doc(code.trim().toUpperCase()).get();
-      if (!codeSnapshot.exists) {
-        return res.status(401).json(JOIN_FAILURE);
+      const lobby = throwOnError(await supabase
+        .from('lobbies')
+        .select('lobby_id, class_id, status')
+        .eq('join_code', code)
+        .maybeSingle());
+      if (!lobby || !['waiting', 'open'].includes(lobby.status)) {
+        return res.status(401).json({ error: 'Could not join' });
       }
 
-      const lobbyId = codeSnapshot.data().lobbyId;
-      if (typeof lobbyId !== 'string' || lobbyId.length === 0) {
-        return res.status(401).json(JOIN_FAILURE);
+      const enrollment = throwOnError(await supabase
+        .from('class_students')
+        .select('student_id')
+        .eq('class_id', lobby.class_id)
+        .eq('student_id', req.user.uid)
+        .maybeSingle());
+      if (!enrollment) return res.status(401).json({ error: 'Could not join' });
+
+      const previous = throwOnError(await supabase
+        .from('lobby_participants')
+        .select('status')
+        .eq('lobby_id', lobby.lobby_id)
+        .eq('student_id', req.user.uid)
+        .maybeSingle());
+      if (previous?.status === 'kicked') {
+        return res.status(401).json({ error: 'Could not join' });
       }
 
-      const lobbyRef = db.collection('lobbies').doc(lobbyId);
-      const joinResult = await db.runTransaction(async (transaction) => {
-        const lobbySnapshot = await transaction.get(lobbyRef);
-        if (!lobbySnapshot.exists || lobbySnapshot.data().status !== 'open') return null;
+      const participantResult = await supabase
+        .from('lobby_participants')
+        .upsert(
+          { lobby_id: lobby.lobby_id, student_id: req.user.uid, status: 'active' },
+          { onConflict: 'lobby_id,student_id' },
+        );
+      throwOnError(participantResult);
 
-        const classRef = db.collection('classes').doc(lobbySnapshot.data().classId);
-        const rosterRef = classRef.collection('roster').doc(studentId);
-        const [classSnapshot, rosterSnapshot] = await Promise.all([
-          transaction.get(classRef),
-          transaction.get(rosterRef),
-        ]);
-        if (!rosterSnapshot.exists && !classSnapshot.data()?.studentIds?.includes(studentId)) {
-          return null;
-        }
-
-        const seatRef = lobbyRef.collection('students').doc(studentId);
-        const seatSnapshot = await transaction.get(seatRef);
-        if (seatSnapshot.data()?.kicked === true) return null;
-
-        const providedName = typeof req.body?.name === 'string' ? req.body.name : null;
-        const fallbackName = cleanDisplayName(providedName) || cleanDisplayName(studentId) || 'Student';
-        if (!fallbackName) return null;
-
-        transaction.set(seatRef, {
-          displayName: fallbackName,
-          joinedAt: admin.firestore.FieldValue.serverTimestamp(),
-          kicked: false,
-        }, { merge: true });
-        return { displayName: fallbackName };
-      });
-
-      if (!joinResult) return res.status(401).json(JOIN_FAILURE);
-
+      const profile = throwOnError(await supabase
+        .from('profiles')
+        .select('display_name')
+        .eq('id', req.user.uid)
+        .single());
       const token = jwt.sign(
-        { role: 'student', lobbyId, studentId },
+        { role: 'student', lobbyId: lobby.lobby_id, studentId: req.user.uid },
         jwtSecret,
         { algorithm: 'HS256', expiresIn: '4h' },
       );
-      return res.json({ token, lobbyId, displayName: joinResult.displayName });
+      return res.json({
+        token,
+        lobbyId: lobby.lobby_id,
+        displayName: profile.display_name,
+      });
     } catch (error) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
       return res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -254,47 +243,59 @@ function createLobbyRouter({ db, admin, requireTeacher, requireStudent, jwtSecre
       return res.status(409).json({ error: 'Lobby is closed' });
     }
 
-    const batch = db.batch();
-    batch.update(req.lobbyRef, { status });
-    if (status === 'closed') {
-      batch.delete(db.collection('lobbyCodes').doc(req.lobbyData.joinCode));
-      const classRef = db.collection('classes').doc(req.lobbyData.classId);
-      const classSnapshot = await classRef.get();
-      if (classSnapshot.data()?.activeLobbyId === req.params.id) {
-        batch.update(classRef, { activeLobbyId: null });
-      }
-    }
-    await batch.commit();
+    const storedStatus = databaseStatus(status);
+    throwOnError(await supabase
+      .from('lobbies')
+      .update({ status: storedStatus })
+      .eq('lobby_id', req.lobbyData.lobby_id));
 
     const io = typeof getIo === 'function' ? getIo() : undefined;
-    io?.to(`lobby:${req.params.id}`).emit('lobby:status', { lobbyId: req.params.id, status });
+    io?.to(`lobby:${req.lobbyData.lobby_id}`).emit('lobby:status', {
+      lobbyId: req.lobbyData.lobby_id,
+      status,
+    });
     if (status === 'closed') {
-      io?.in(`lobby:${req.params.id}`).disconnectSockets(true);
+      io?.in(`lobby:${req.lobbyData.lobby_id}`).disconnectSockets(true);
     }
 
-    return res.json({ lobbyId: req.params.id, status });
+    return res.json({ lobbyId: req.lobbyData.lobby_id, status });
   });
 
   router.get('/lobbies/:id/students', requireTeacher, requireLobbyOwner, async (req, res) => {
-    const snapshot = await req.lobbyRef.collection('students').get();
+    const participants = throwOnError(await supabase
+      .from('lobby_participants')
+      .select('student_id')
+      .eq('lobby_id', req.lobbyData.lobby_id)
+      .eq('status', 'active'));
+    const studentIds = participants.map(({ student_id }) => student_id);
+    if (!studentIds.length) return res.json({ students: [] });
+
+    const profiles = throwOnError(await supabase
+      .from('profiles')
+      .select('id, display_name')
+      .in('id', studentIds)
+      .order('display_name'));
     return res.json({
-      students: snapshot.docs
-        .filter((doc) => doc.data().kicked !== true)
-        .map((doc) => ({ studentId: doc.id, ...doc.data() })),
+      students: profiles.map(({ id, display_name }) => ({ studentId: id, displayName: display_name })),
     });
   });
 
   router.delete('/lobbies/:id/students/:studentId', requireTeacher, requireLobbyOwner, async (req, res) => {
     const { studentId } = req.params;
-    if (!validStudentId(studentId)) {
+    if (!UUID_PATTERN.test(studentId)) {
       return res.status(400).json({ error: 'Invalid studentId' });
     }
 
-    await req.lobbyRef.collection('students').doc(studentId).set({ kicked: true }, { merge: true });
+    throwOnError(await supabase
+      .from('lobby_participants')
+      .update({ status: 'kicked' })
+      .eq('lobby_id', req.lobbyData.lobby_id)
+      .eq('student_id', studentId)
+      .eq('status', 'active'));
 
     const io = typeof getIo === 'function' ? getIo() : undefined;
     if (io) {
-      const sockets = await io.in(`lobby:${req.params.id}`).fetchSockets();
+      const sockets = await io.in(`lobby:${req.lobbyData.lobby_id}`).fetchSockets();
       const matchingSockets = sockets.filter((socket) => socket.data.studentId === studentId);
       await Promise.all(matchingSockets.map((socket) => socket.disconnect(true)));
     }
@@ -305,4 +306,8 @@ function createLobbyRouter({ db, admin, requireTeacher, requireStudent, jwtSecre
   return router;
 }
 
-module.exports = { createLobbyRouter };
+module.exports = {
+  clientStatus,
+  createLobbyRouter,
+  databaseStatus,
+};
