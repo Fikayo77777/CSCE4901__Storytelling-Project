@@ -72,12 +72,15 @@ function createClassesRouter({ supabase, requireTeacher, getIo }) {
     const accepted = rows.filter(({ studentId }) => existingIds.has(studentId));
     const missing = rows.filter(({ studentId }) => !existingIds.has(studentId));
 
-    for (const { studentId, displayName } of accepted) {
-      throwOnError(await supabase
-        .from('profiles')
-        .update({ display_name: displayName })
-        .eq('id', studentId));
-    }
+    await Promise.all(
+      accepted.map(({ studentId, displayName }) =>
+        supabase
+          .from('profiles')
+          .update({ display_name: displayName })
+          .eq('id', studentId)
+          .then(throwOnError),
+      ),
+    );
 
     if (accepted.length) {
       throwOnError(await supabase
