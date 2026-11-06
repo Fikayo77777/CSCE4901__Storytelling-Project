@@ -248,10 +248,9 @@ function createClassesRouter({ supabase, requireTeacher, getIo }) {
 
     const io = typeof getIo === 'function' ? getIo() : undefined;
     if (io && lobbyIds.length) {
-      const sockets = await io.fetchSockets();
-      const matchingSockets = sockets.filter(
-        (socket) => lobbyIds.includes(socket.data.lobbyId) && socket.data.studentId === studentId,
-      );
+      const rooms = lobbyIds.map((id) => `lobby:${id}`);
+      const sockets = await io.in(rooms).fetchSockets();
+      const matchingSockets = sockets.filter((socket) => socket.data.studentId === studentId);
       await Promise.all(matchingSockets.map((socket) => socket.disconnect(true)));
     }
     return res.json({ deleted: true });
