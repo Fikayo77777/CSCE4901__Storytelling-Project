@@ -1,12 +1,9 @@
 const { createClassesRouter } = require('./classes');
 const { createLobbyRouter } = require('./lobby');
 const { createSocketAuth } = require('./socketAuth');
-const {
-  createRequireStudent,
-  createRequireTeacher,
-  createRequireUser,
-  createSupabaseAuthMiddleware,
-} = require('./auth');
+const { createRequireStudent, createRequireTeacher } = require('./auth');
+const { createLobbyService, createLobby, joinLobby } = require('./lobbyService');
+const { createLobbyRoutes } = require('./lobbyRoutes');
 
 module.exports = {
   createClassesRouter,
@@ -14,6 +11,8 @@ module.exports = {
   createSocketAuth,
   createRequireStudent,
   createRequireTeacher,
-  createRequireUser,
-  createSupabaseAuthMiddleware,
+  createLobbyService,
+  createLobby,
+  joinLobby,
+  createLobbyRoutes,
 };

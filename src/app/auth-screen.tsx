@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { User } from "@supabase/supabase-js";
+import type { User } from "firebase/auth";
 import { CoverBook, CoverFrame } from "@/components/auth/CoverArtwork";
-import { supabase, supabaseConfigurationMissing } from "./supabase-client";
+import { logIn, signUp } from "../app/Login_Signup_Backend/authServiceFB";
+import { authConfigurationMissing } from "./firebase-client";
 
 type AuthView =
   | "roleSelection"
@@ -62,44 +63,31 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     event.preventDefault();
     setSubmissionNotice("");
     const form = event.currentTarget;
+    // Recheck on submit too, including values supplied by autofill.
     updateFormValidity(form);
     if (!form.reportValidity()) return;
 
     const formData = new FormData(form);
-    const email = String(formData.get("email") ?? "").trim();
+    const email = String(formData.get("email") ?? formData.get("username") ?? "").trim();
     const password = String(formData.get("password") ?? "");
     const firstName = String(formData.get("firstName") ?? "").trim();
     const lastName = String(formData.get("lastName") ?? "").trim();
 
-    if (!supabase) {
-      setSubmissionNotice("Set the public Supabase configuration before signing in.");
-      return;
-    }
-
     try {
-      if (view === "teacherSignup" || (view === "studentLogin" && creatingStudentAccount)) {
-        const displayName = `${firstName} ${lastName}`.trim() || email.split("@")[0];
-        const { data, error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: { data: { display_name: displayName } },
-        });
-        if (error) throw error;
-        if (data.session && data.user) {
-          onAuthenticated?.(data.user, view === "teacherSignup" ? "teacher" : "student");
-        }
-        setSubmissionNotice(
-          data.session
-            ? "Account created. Teacher access must be enabled by an administrator."
-            : "Account created. Check your email to confirm your account.",
-        );
-      } else {
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        if (data.user) {
-          onAuthenticated?.(data.user, view === "teacherLogin" ? "teacher" : "student");
-        }
+      if (view === "teacherSignup") {
+        const user = await signUp(email, password, firstName, lastName);
+        setSubmissionNotice("Account created.");
+        onAuthenticated?.(user, "teacher");
+      } else if (view === "teacherLogin") {
+        const user = await logIn(email, password);
         setSubmissionNotice("Logged in.");
+        onAuthenticated?.(user, "teacher");
+      } else if (view === "studentLogin") {
+        const user = creatingStudentAccount
+          ? await signUp(email, password, firstName, lastName)
+          : await logIn(email, password);
+        setSubmissionNotice(creatingStudentAccount ? "Account created." : "Logged in.");
+        onAuthenticated?.(user, "student");
       }
     } catch (err) {
       setSubmissionNotice(err instanceof Error ? err.message : "Authentication failed.");
@@ -249,8 +237,8 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               </button>
               <p id="login-note" className="form-note" role="status">
                 {submissionNotice ||
-                  (supabaseConfigurationMissing
-                    ? "Set the public Supabase configuration before signing in."
+                  (authConfigurationMissing
+                    ? "Set the public Firebase configuration before signing in."
                     : "Sign in with your teacher account to open the host lobby.")}
               </p>
             </form>
@@ -365,8 +353,8 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               </button>
               <p id="signup-note" className="form-note" role="status">
                 {submissionNotice ||
-                  (supabaseConfigurationMissing
-                    ? "Set the public Supabase configuration before creating an account."
+                  (authConfigurationMissing
+                    ? "Set the public Firebase configuration before creating an account."
                     : "Create your teacher account to host classroom lobbies.")}
               </p>
             </form>

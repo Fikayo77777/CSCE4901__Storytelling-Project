@@ -1,73 +1,132 @@
 const jwt = require('jsonwebtoken');
-const { createSocketAuth } = require('../src/socketAuth');
+const { io: createClient } = require('socket.io-client');
+const request = require('supertest');
+const {
+  JWT_SECRET,
+  clearFirestore,
+  seedClass,
+  seedRoster,
+  seedLobby,
+  startTestServer,
+  deleteFirebaseApp,
+  db,
+} = require('./helpers');
 
-const SECRET = 'a-test-secret-long-enough-to-satisfy-the-minimum';
-const LOBBY_ID = '00000000-0000-4000-8000-000000000001';
-const STUDENT_ID = '00000000-0000-4000-8000-000000000002';
+let testServer;
 
-function createSupabase(status = 'waiting', participantStatus = 'active') {
-  let relation;
-  const query = {
-    select: jest.fn(() => query),
-    eq: jest.fn(() => query),
-    maybeSingle: jest.fn(async () => ({
-      data: relation === 'lobbies' ? { status } : { status: participantStatus },
-      error: null,
-    })),
-  };
-  return {
-    from: jest.fn((table) => {
-      relation = table;
-      return query;
-    }),
-  };
+beforeAll(async () => {
+  testServer = await startTestServer();
+});
+
+beforeEach(async () => {
+  await clearFirestore();
+  await seedClass();
+  await seedLobby();
+  await seedRoster('class-one', [{ studentId: 'student-one', displayName: 'Roster Name' }]);
+  await db.collection('lobbies').doc('lobby-one').collection('students').doc('student-one').set({
+    displayName: 'Roster Name',
+    kicked: false,
+  });
+});
+
+afterAll(async () => {
+  await testServer.stop();
+  await deleteFirebaseApp();
+});
+
+function token(secret = JWT_SECRET, options = {}) {
+  return jwt.sign({ role: 'student', lobbyId: 'lobby-one', studentId: 'student-one' }, secret, options);
 }
 
-function createSocket(token) {
-  return {
-    handshake: { auth: token ? { token } : {} },
-    data: {},
-    join: jest.fn(),
-  };
+function connect(tokenValue, auth = tokenValue === undefined ? {} : { token: tokenValue }) {
+  return createClient(testServer.url, {
+    auth,
+    transports: ['websocket'],
+    reconnection: false,
+    timeout: 3000,
+  });
 }
 
-describe('Socket.IO participant authorization', () => {
-  test('verifies a valid seat and joins its lobby room', async () => {
-    const supabase = createSupabase();
-    const socket = createSocket(jwt.sign({
+function rejectedConnection(client) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      client.close();
+      reject(new Error('Socket connection did not fail'));
+    }, 4000);
+    client.once('connect', () => {
+      clearTimeout(timeout);
+      client.close();
+      reject(new Error('Socket connection unexpectedly succeeded'));
+    });
+    client.once('connect_error', (error) => {
+      clearTimeout(timeout);
+      client.close();
+      resolve(error);
+    });
+  });
+}
+
+describe('Socket.io authentication', () => {
+  test('accepts a valid token, sets trusted socket data, and joins its token lobby room', async () => {
+    const client = connect(token());
+    await new Promise((resolve, reject) => {
+      client.once('connect', resolve);
+      client.once('connect_error', reject);
+    });
+
+    const sockets = await testServer.io.in('lobby:lobby-one').fetchSockets();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].data).toEqual({
       role: 'student',
-      lobbyId: LOBBY_ID,
-      studentId: STUDENT_ID,
-    }, SECRET));
-    const next = jest.fn();
-
-    await createSocketAuth({ supabase, jwtSecret: SECRET })(socket, next);
-
-    expect(socket.data).toEqual({ role: 'student', lobbyId: LOBBY_ID, studentId: STUDENT_ID });
-    expect(socket.join).toHaveBeenCalledWith(`lobby:${LOBBY_ID}`);
-    expect(next).toHaveBeenCalledWith();
+      lobbyId: 'lobby-one',
+      studentId: 'student-one',
+    });
+    client.close();
   });
 
-  test('rejects a revoked seat', async () => {
-    const socket = createSocket(jwt.sign({
-      role: 'student',
-      lobbyId: LOBBY_ID,
-      studentId: STUDENT_ID,
-    }, SECRET));
-    const next = jest.fn();
-
-    await createSocketAuth({
-      supabase: createSupabase('waiting', 'kicked'),
-      jwtSecret: SECRET,
-    })(socket, next);
-
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'unauthorized' }));
+  test.each([
+    ['missing', undefined],
+    ['malformed', 'not-a-jwt'],
+    ['expired', () => token(JWT_SECRET, { expiresIn: -1 })],
+    ['wrong-secret', () => token('a-different-secret-that-is-also-long-enough')],
+    ['none-algorithm', () => jwt.sign(
+      { role: 'student', lobbyId: 'lobby-one', studentId: 'student-one' },
+      null,
+      { algorithm: 'none' },
+    )],
+  ])('rejects a %s token with only the generic error', async (label, value) => {
+    const suppliedToken = typeof value === 'function' ? value() : value;
+    const error = await rejectedConnection(connect(suppliedToken));
+    expect(error.message).toBe('unauthorized');
   });
 
-  test('rejects missing credentials', async () => {
-    const next = jest.fn();
-    await createSocketAuth({ supabase: createSupabase(), jwtSecret: SECRET })(createSocket(), next);
+  test('rejects a token after its seat is kicked', async () => {
+    await db.collection('lobbies').doc('lobby-one').collection('students').doc('student-one').update({ kicked: true });
+    const error = await rejectedConnection(connect(token()));
 
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'unauthorized' }));
+    expect(error.message).toBe('unauthorized');
+  });
+
+  test('rejects a token after the lobby closes', async () => {
+    await db.collection('lobbies').doc('lobby-one').update({ status: 'closed' });
+    const error = await rejectedConnection(connect(token()));
+
+    expect(error.message).toBe('unauthorized');
+  });
+
+  test('a teacher kick disconnects the live student socket', async () => {
+    const client = connect(token());
+    await new Promise((resolve, reject) => {
+      client.once('connect', resolve);
+      client.once('connect_error', reject);
+    });
+    const disconnected = new Promise((resolve) => client.once('disconnect', resolve));
+    const response = await request(testServer.app)
+      .delete('/lobbies/lobby-one/students/student-one')
+      .set('x-teacher-id', 'teacher-one');
+
+    expect(response.status).toBe(200);
+    expect(await disconnected).toBe('io server disconnect');
+    client.close();
   });
 });
