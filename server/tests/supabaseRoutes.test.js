@@ -1,8 +1,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
-const { createClassesRouter } = require('../src/classes');
-const { createLobbyRouter } = require('../src/lobby');
+const { createClassesRouter } = require('../src/supabaseClasses');
+const { createLobbyRouter } = require('../src/supabaseLobby');
 const { createSupabaseMock } = require('./supabaseMock');
 
 const TEACHER_ID = '00000000-0000-4000-8000-000000000001';
@@ -20,11 +20,11 @@ function identity(role) {
 function createApp(supabase) {
   const app = express();
   app.use(express.json());
-  app.use(createClassesRouter({
+  app.use('/supabase', createClassesRouter({
     supabase,
     requireTeacher: identity('teacher'),
   }));
-  app.use(createLobbyRouter({
+  app.use('/supabase', createLobbyRouter({
     supabase,
     requireTeacher: identity('teacher'),
     requireStudent: identity('student'),
@@ -52,7 +52,7 @@ describe('Supabase-backed class and lobby routes', () => {
   test('creates a class with the Supabase table column names', async () => {
     const supabase = seededSupabase();
     const response = await request(createApp(supabase))
-      .post('/classes')
+      .post('/supabase/classes')
       .send({ name: 'New Class' });
 
     expect(response.status).toBe(201);
@@ -66,7 +66,7 @@ describe('Supabase-backed class and lobby routes', () => {
   test('imports UUID roster records and uses profiles as the roster-name source', async () => {
     const supabase = seededSupabase();
     const response = await request(createApp(supabase))
-      .post(`/classes/${CLASS_ID}/roster`)
+      .post(`/supabase/classes/${CLASS_ID}/roster`)
       .attach('file', Buffer.from(`studentId,name\n${STUDENT_ID},Ada Lovelace\n`), 'roster.csv');
 
     expect(response.status).toBe(200);
@@ -82,7 +82,7 @@ describe('Supabase-backed class and lobby routes', () => {
     const supabase = seededSupabase();
     const app = createApp(supabase);
     const created = await request(app)
-      .post('/lobbies')
+      .post('/supabase/lobbies')
       .send({ classId: CLASS_ID });
 
     expect(created.status).toBe(201);
@@ -93,7 +93,7 @@ describe('Supabase-backed class and lobby routes', () => {
       status: 'waiting',
     });
 
-    const listed = await request(app).get(`/lobbies?classId=${CLASS_ID}`);
+    const listed = await request(app).get(`/supabase/lobbies?classId=${CLASS_ID}`);
     expect(listed.body.lobbies[0]).toMatchObject({
       lobbyId: lobby.lobby_id,
       joinCode: lobby.join_code,
@@ -101,7 +101,7 @@ describe('Supabase-backed class and lobby routes', () => {
     });
 
     const started = await request(app)
-      .patch(`/lobbies/${lobby.lobby_id}`)
+      .patch(`/supabase/lobbies/${lobby.lobby_id}`)
       .send({ status: 'locked' });
     expect(started.status).toBe(200);
     expect(lobby.status).toBe('active');
@@ -119,7 +119,7 @@ describe('Supabase-backed class and lobby routes', () => {
     }];
 
     const response = await request(createApp(supabase))
-      .post('/lobbies/join')
+      .post('/supabase/lobbies/join')
       .set('x-user-id', STUDENT_ID)
       .send({ code: 'ABC234' });
 
@@ -137,7 +137,7 @@ describe('Supabase-backed class and lobby routes', () => {
     });
 
     const refreshed = await request(createApp(supabase))
-      .get(`/lobbies/${lobbyId}/students`);
+      .get(`/supabase/lobbies/${lobbyId}/students`);
     expect(refreshed.status).toBe(200);
     expect(refreshed.body.students).toEqual([
       { studentId: STUDENT_ID, displayName: 'Student' },
@@ -147,7 +147,7 @@ describe('Supabase-backed class and lobby routes', () => {
   test('rejects a validly formatted but unknown lobby code', async () => {
     const supabase = seededSupabase();
     const response = await request(createApp(supabase))
-      .post('/lobbies/join')
+      .post('/supabase/lobbies/join')
       .set('x-user-id', STUDENT_ID)
       .send({ code: 'ZZZZZZ' });
 
@@ -169,7 +169,7 @@ describe('Supabase-backed class and lobby routes', () => {
     }];
 
     const response = await request(createApp(supabase))
-      .post('/lobbies/join')
+      .post('/supabase/lobbies/join')
       .set('x-user-id', outsiderId)
       .send({ code: 'ABC234' });
 

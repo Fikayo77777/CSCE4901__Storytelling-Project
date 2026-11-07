@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { createSocketAuth } = require('../src/socketAuth');
+const { createSocketAuth } = require('../src/supabaseSocketAuth');
 
 const SECRET = 'a-test-secret-long-enough-to-satisfy-the-minimum';
 const LOBBY_ID = '00000000-0000-4000-8000-000000000001';

@@ -1,4 +1,4 @@
-const { clientStatus, databaseStatus } = require('../src/lobby');
+const { clientStatus, databaseStatus } = require('../src/supabaseLobby');
 
 describe('lobby status mapping', () => {
   test.each([

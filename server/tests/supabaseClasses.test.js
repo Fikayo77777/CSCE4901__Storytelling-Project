@@ -1,4 +1,4 @@
-const { validStudentId } = require('../src/classes');
+const { validStudentId } = require('../src/supabaseClasses');
 
 describe('Supabase UUID validation', () => {
   test('accepts a canonical UUID', () => {

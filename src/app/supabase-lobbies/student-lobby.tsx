@@ -34,7 +34,7 @@ export function StudentLobby({ user }: { user: User }) {
       const accessToken = sessionData.session?.access_token;
       if (!accessToken) throw new Error("Sign in is required.");
 
-      const response = await fetch("/api/lobbies/join", {
+      const response = await fetch("/api/supabase/lobbies/join", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -47,7 +47,7 @@ export function StudentLobby({ user }: { user: User }) {
 
       const result = payload as JoinResponse;
       setJoined(result);
-      const socket = io(process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000", {
+      const socket = io(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"}/supabase`, {
         auth: { token: result.token },
         transports: ["websocket"],
         reconnection: false,

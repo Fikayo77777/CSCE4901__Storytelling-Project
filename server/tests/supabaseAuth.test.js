@@ -4,7 +4,7 @@ const {
   createRequireStudent,
   createRequireTeacher,
   createRequireUser,
-} = require('../src/auth');
+} = require('../src/supabaseAuth');
 
 function createSupabase({ user, profile, profileError, profileInitiallyMissing = false } = {}) {
   let profileRead = 0;

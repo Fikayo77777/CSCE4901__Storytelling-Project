@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import type { User } from "@supabase/supabase-js";
-import { AuthScreen } from "./auth-screen";
+import { SupabaseAuthScreen } from "./auth-screen";
 import { supabase, supabaseConfigurationMissing } from "./supabase-client";
 import { StudentLobby } from "./student-lobby";
 
@@ -27,7 +27,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch("/api" + path, { ...options, headers });
+  const response = await fetch("/api/supabase" + path, { ...options, headers });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload.error || "Request failed (" + response.status + ")");
@@ -85,7 +85,7 @@ export default function Home() {
         return;
       }
       setAuthReady(false);
-      void fetch("/api/profile", {
+      void fetch("/api/supabase/profile", {
         headers: { Authorization: `Bearer ${session.access_token}` },
       }).then(async (response) => {
         const payload = await response.json().catch(() => ({}));
@@ -391,7 +391,7 @@ export default function Home() {
   }
   if (!user) {
     return (
-      <AuthScreen
+      <SupabaseAuthScreen
         onAuthenticated={(authedUser) => {
           setUser(authedUser);
           setAuthReady(false);
