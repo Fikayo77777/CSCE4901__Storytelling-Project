@@ -112,6 +112,15 @@ export default function TeacherReviewPage({
   );
 }
 
+// Turn a database section name like "rising_action" into "Rising Action".
+function formatSection(section: string) {
+  return section
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 // One student's segment with its own feedback box and approve button.
 function SegmentCard({
   segment,
@@ -165,7 +174,7 @@ function SegmentCard({
       <article>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-semibold">
-            {segment.section || `Part ${segment.order}`}
+            {formatSection(segment.section) || `Part ${segment.order}`}
           </p>
           <span className="rounded-full bg-white px-3 py-1 text-sm font-semibold">
             {approved ? "Approved" : "Awaiting review"}
