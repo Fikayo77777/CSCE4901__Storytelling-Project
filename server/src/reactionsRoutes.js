@@ -15,7 +15,7 @@ function createReactionsRouter({ supabase, requireStudent }) {
   // All reaction requests require a logged-in student.
   router.use(requireStudent);
 
-  
+
   // Check whether the student belongs to the story's class.
   async function studentCanAccessStory(studentId, storyId) {
     const { data: story, error: storyError } = await supabase
@@ -155,7 +155,7 @@ const { segmentId, studentId, reactionType } = req.body || {};
         });
       }
 
-      
+
       const allowed = await studentCanAccessStory(
         req.user.uid,
         segment.story_id
